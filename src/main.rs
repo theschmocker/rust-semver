@@ -113,12 +113,15 @@ impl SemanticVersion {
         match part {
             SemanticVersionPart::Major => Self {
                 major: self.major + 1,
+                minor: 0,
+                patch: 0,
                 prerelease: self.prerelease.as_ref().map(|s| s.as_str().to_owned()),
                 buildmetadata: self.buildmetadata.as_ref().map(|s| s.as_str().to_owned()),
                 ..*self
             },
             SemanticVersionPart::Minor => Self {
                 minor: self.minor + 1,
+                patch: 0,
                 prerelease: self.prerelease.as_ref().map(|s| s.as_str().to_owned()),
                 buildmetadata: self.buildmetadata.as_ref().map(|s| s.as_str().to_owned()),
                 ..*self
@@ -390,6 +393,18 @@ mod tests {
             "1.0.0-alpha+myawesomebuild",
             SemanticVersionPart::Major,
         )
+    }
+
+    #[test]
+    fn bump_version_major_resets_minor_and_patch() {
+        let bumped_version = SemanticVersion::from_str("1.2.3").unwrap().bump(SemanticVersionPart::Major);
+        assert_eq!(SemanticVersion::from_str("2.0.0").unwrap(), bumped_version)
+    }
+
+    #[test]
+    fn bump_version_minor_resets_patch() {
+        let bumped_version = SemanticVersion::from_str("1.2.3").unwrap().bump(SemanticVersionPart::Minor);
+        assert_eq!(SemanticVersion::from_str("1.3.0").unwrap(), bumped_version)
     }
 
     #[test]
