@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::{error::Error, fmt::Display, num::ParseIntError, str::FromStr};
+use std::{cmp::Ordering, error::Error, fmt::Display, num::ParseIntError, str::FromStr};
 use structopt::StructOpt;
 
 fn main() -> std::io::Result<()> {
@@ -16,13 +16,96 @@ struct Cli {
     version: SemanticVersion,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 struct SemanticVersion {
     major: u32,
     minor: u32,
     patch: u32,
     prerelease: Option<String>,
     buildmetadata: Option<String>,
+}
+
+impl PartialEq for SemanticVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.major == other.major
+            && self.minor == other.minor
+            && self.patch == other.patch
+            && self.prerelease == other.prerelease
+        // buildmetadata has no bearing on equivalence
+    }
+}
+
+impl PartialOrd for SemanticVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match self.major.partial_cmp(&other.major) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.minor.partial_cmp(&other.minor) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.patch.partial_cmp(&other.patch) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+
+        // regular version numbers are equal at this point, so compare prerelease
+        match (&self.prerelease, &other.prerelease) {
+            // no prerelease; versions are equal
+            (None, None) => Some(Ordering::Equal),
+
+            // if a version without a prerelease is otherwise equal to a version with a prerelease, the version without takes precedence
+            (Some(_), None) => Some(Ordering::Less),
+            (None, Some(_)) => Some(Ordering::Greater),
+
+            (Some(self_prerelease_str), Some(other_prerelease_str)) => {
+                let self_ids: Vec<_> = self_prerelease_str.split('.').collect();
+                let other_ids: Vec<_> = other_prerelease_str.split('.').collect();
+
+                for (self_id, other_id) in self_ids.iter().zip(other_ids.iter()) {
+                    let self_id_numeric_result = self_id.parse::<u64>();
+                    let other_id_numeric_result = other_id.parse::<u64>();
+
+                    match (self_id_numeric_result, other_id_numeric_result) {
+                        // numeric identifiers are compared
+                        (Ok(self_id_numeric), Ok(other_id_numeric)) => {
+                            let numeric_order = self_id_numeric.cmp(&other_id_numeric);
+                            if numeric_order != Ordering::Equal {
+                                return Some(numeric_order);
+                            }
+                        }
+
+                        // non-numeric identifiers take precedence over numeric identifiers
+                        (Ok(_), Err(_)) => {
+                            return Some(Ordering::Less);
+                        }
+                        (Err(_), Ok(_)) => {
+                            return Some(Ordering::Greater);
+                        }
+
+                        // neither numeric; move to string comparison
+                        (Err(_), Err(_)) => (),
+                    }
+
+                    // compare identifiers as strings
+                    let str_order = self_id.cmp(other_id);
+                    if str_order != Ordering::Equal {
+                        return Some(str_order);
+                    }
+                }
+
+                // the identifier comparison above is limited by the min number of prerelease identifiers between the two
+                // at this point, the prerelease ids are equivalent up til and including that min bound. precedence is
+                // finally determined by the largest number of prerelease ids
+                Some(match (self_ids.len(), other_ids.len()) {
+                    (s, o) if s > o => Ordering::Greater,
+                    (s, o) if s < o => Ordering::Less,
+                    _ => Ordering::Equal,
+                })
+            }
+        }
+    }
 }
 
 impl SemanticVersion {
@@ -307,6 +390,53 @@ mod tests {
             "1.0.0-alpha+myawesomebuild",
             SemanticVersionPart::Major,
         )
+    }
+
+    #[test]
+    fn precedence_of_normal_versions() {
+        let first = SemanticVersion::from_str("1.0.0").unwrap();
+        let second = SemanticVersion::from_str("2.0.0").unwrap();
+        let third = SemanticVersion::from_str("2.1.0").unwrap();
+        let forth = SemanticVersion::from_str("2.1.1").unwrap();
+
+        assert!(first < second && second < third && third < forth);
+        assert!(first == first)
+    }
+
+    #[test]
+    fn precedence_prerelease_and_normal_version() {
+        let normal = SemanticVersion::from_str("1.0.0").unwrap();
+        let prerelease = SemanticVersion::from_str("1.0.0-alpha").unwrap();
+
+        assert!(prerelease < normal)
+    }
+
+    #[test]
+    fn precedence_between_prereleases() {
+        let v1 = SemanticVersion::from_str("1.0.0-alpha").unwrap();
+        let v2 = SemanticVersion::from_str("1.0.0-alpha.1").unwrap();
+        let v3 = SemanticVersion::from_str("1.0.0-alpha.beta").unwrap();
+        let v4 = SemanticVersion::from_str("1.0.0-beta").unwrap();
+        let v5 = SemanticVersion::from_str("1.0.0-beta.2").unwrap();
+        let v6 = SemanticVersion::from_str("1.0.0-beta.11").unwrap();
+        let v7 = SemanticVersion::from_str("1.0.0-rc.1").unwrap();
+        let v8 = SemanticVersion::from_str("1.0.0").unwrap();
+
+        assert!(v1 < v2 && v2 < v3 && v3 < v4 && v4 < v5 && v5 < v6 && v6 < v7 && v7 < v8)
+    }
+
+    #[test]
+    fn precedence_unaffected_by_buildmetadata() {
+        let no_buildmeta = SemanticVersion::from_str("1.0.0").unwrap();
+        let with_buildmeta = SemanticVersion::from_str("1.0.0+asdf").unwrap();
+
+        assert_eq!(no_buildmeta, with_buildmeta);
+
+        let no_buildmeta_greater = SemanticVersion::from_str("2.0.0").unwrap();
+        assert!(no_buildmeta_greater > with_buildmeta);
+
+        let prerelease_version = SemanticVersion::from_str("1.0.0-alpha").unwrap();
+        assert!(prerelease_version < with_buildmeta);
     }
 
     fn test_bump(expected: &str, version: &str, part: SemanticVersionPart) {
